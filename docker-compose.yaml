@@ -1,0 +1,186 @@
+version: "3"
+
+services:
+  mongo1:
+    container_name: localmongo1
+    hostname: mongo1
+    image: mongo
+    volumes:
+      - "./scripts/rs-init.sh:/scripts/rs-init.sh"
+      - ./data/mongo-1:/data/db
+    networks:
+      - kafka-debezium-network
+    ports:
+      - 27017:27017
+    links:
+      - mongo2
+      - mongo3
+    depends_on:
+      - mongo2
+      - mongo3
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=mongoadmin
+      - MONGO_INITDB_ROOT_PASSWORD=mongoadmin
+      - MONGO_INITDB_DATABASE=admin
+    restart: always
+    entrypoint: [ "/usr/bin/mongod", "--bind_ip_all", "--replSet", "dbrs" ]
+  mongo2:
+    hostname: mongo2
+    container_name: localmongo2
+    image: mongo
+    networks:
+      - kafka-debezium-network
+    ports:
+      - 27018:27017
+    volumes:
+      - ./data/mongo-2:/data/db
+    restart: always
+    entrypoint: [ "/usr/bin/mongod", "--bind_ip_all", "--replSet", "dbrs" ]
+  mongo3:
+    hostname: mongo3
+    container_name: localmongo3
+    image: mongo
+    networks:
+      - kafka-debezium-network
+    ports:
+      - 27019:27017
+    volumes:
+      - ./data/mongo-3:/data/db
+    restart: always
+    entrypoint: [ "/usr/bin/mongod", "--bind_ip_all", "--replSet", "dbrs" ]
+
+  zookeeper:
+    ports:
+      - 2181:2181
+      - 2888:2888
+      - 3888:3888
+    container_name: zookeper-debezium
+    image: quay.io/debezium/zookeeper
+    hostname: zookeper
+    tmpfs: "/datalog"
+    networks:
+      - kafka-debezium-network
+
+  kafka:
+    ports:
+      - 9092:9092
+    container_name: kafka-debezium
+    hostname: kafka
+    image: quay.io/debezium/kafka
+    restart: always
+    links:
+      - zookeeper
+    environment:
+     - ZOOKEEPER_CONNECT=zookeeper:2181
+    networks:
+      - kafka-debezium-network
+
+  connect:
+    image: confluentinc/cp-kafka-connect
+    hostname: connect
+    ports:
+      - 8083:8083
+    container_name: connect-debezium
+    volumes:
+      - ./connectors:/usr/share/kafka/plugins
+    links:
+      - kafka
+      - mongo1
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_GROUP_ID: "connect"
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect.cluster.configs"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect.cluster.offsets"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: "connect.cluster.status"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      CONNECT_KEY_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONNECT_VALUE_CONVERTER: "io.confluent.connect.avro.AvroConverter"
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "connect"
+      CONNECT_PLUGIN_PATH: "/usr/share/kafka/plugins"
+    networks:
+      - kafka-debezium-network
+    depends_on:
+      - kafka
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:6.2.0
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      - zookeeper
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: 'zookeeper:2181'
+    networks:
+      - kafka-debezium-network
+
+  # kafka-ui:
+  #   image: provectuslabs/kafka-ui
+  #   container_name: kafka-ui
+  #   ports:
+  #     - "9021:8080"
+  #   networks:
+  #     - kafka-debezium-network
+  #   restart: always
+  #   environment:
+  #     - KAFKA_CLUSTERS_0_NAME=local
+  #     - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+
+  akhq:
+    image: tchiotludo/akhq
+    container_name: akhq
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            docker-kafka-server:
+              properties:
+                bootstrap.servers: "kafka:9092"
+              schema-registry:
+                url: "http://schema-registry:8081"
+              connect:
+                - name: "connect"
+                  url: "http://connect:8083"
+    ports:
+      - 9020:8080
+    networks:
+      - kafka-debezium-network
+    links:
+      - kafka
+      - schema-registry
+
+  # control-center:
+  #   image: confluentinc/cp-enterprise-control-center:5.4.0
+  #   hostname: control-center
+  #   container_name: control-center
+  #   depends_on:
+  #     - zookeeper
+  #     - kafka
+  #     - schema-registry
+  #   ports:
+  #     - 9022:9021
+  #   networks:
+  #     - kafka-debezium-network
+  #   links:
+  #     - schema-registry
+  #   environment:
+  #     CONTROL_CENTER_BOOTSTRAP_SERVERS: 'kafka:9092'
+  #     CONTROL_CENTER_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+  #     CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+  #     CONTROL_CENTER_REPLICATION_FACTOR: 1
+  #     CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+  #     CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+  #     CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+  #     PORT: 9021
+
+networks:
+  kafka-debezium-network:
+    driver: bridge
